@@ -1,0 +1,162 @@
+name: Build Loyalty Slot
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.2.1
+      - name: Create mod project files
+        run: |
+          cat > settings.gradle <<'EOF_LOYALTY'
+          pluginManagement {
+              repositories {
+                  maven { url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EOF_LOYALTY
+          cat > gradle.properties <<'EOF_LOYALTY'
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=1.21.11
+          loader_version=0.19.5
+          loom_version=1.14-SNAPSHOT
+          mod_version=1.0.0
+          maven_group=com.loyaltyslot
+          archives_base_name=loyalty-slot
+          EOF_LOYALTY
+          cat > build.gradle <<'EOF_LOYALTY'
+          plugins {
+              id 'fabric-loom' version "${loom_version}"
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+          base { archivesName = project.archives_base_name }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings loom.officialMojangMappings()
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") { expand "version": project.version }
+          }
+
+          tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EOF_LOYALTY
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'EOF_LOYALTY'
+          {
+            "schemaVersion": 1,
+            "id": "loyaltyslot",
+            "version": "${version}",
+            "name": "Loyalty Slot",
+            "description": "Loyalty tridents return to the inventory slot they were thrown from.",
+            "license": "MIT",
+            "environment": "*",
+            "mixins": ["loyaltyslot.mixins.json"],
+            "depends": {
+              "fabricloader": ">=0.19.5",
+              "minecraft": "~1.21.11",
+              "java": ">=21"
+            }
+          }
+          EOF_LOYALTY
+          mkdir -p src/main/resources
+          cat > src/main/resources/loyaltyslot.mixins.json <<'EOF_LOYALTY'
+          {
+            "required": true,
+            "package": "com.loyaltyslot.mixin",
+            "compatibilityLevel": "JAVA_21",
+            "mixins": ["ThrownTridentMixin"],
+            "injectors": { "defaultRequire": 1 }
+          }
+          EOF_LOYALTY
+          mkdir -p src/main/java/com/loyaltyslot/mixin
+          cat > src/main/java/com/loyaltyslot/mixin/ThrownTridentMixin.java <<'EOF_LOYALTY'
+          package com.loyaltyslot.mixin;
+
+          import net.minecraft.world.entity.EntityType;
+          import net.minecraft.world.entity.LivingEntity;
+          import net.minecraft.world.entity.player.Inventory;
+          import net.minecraft.world.entity.player.Player;
+          import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
+          import net.minecraft.world.entity.projectile.arrow.ThrownTrident;
+          import net.minecraft.world.item.ItemStack;
+          import net.minecraft.world.level.Level;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.Unique;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+          @Mixin(ThrownTrident.class)
+          public abstract class ThrownTridentMixin extends AbstractArrow {
+
+              /** Inventory slot the trident was thrown from (0-8 hotbar, 9-35 main, 40 offhand). -1 = unknown. */
+              @Unique
+              private int loyaltyslot$slot = -1;
+
+              protected ThrownTridentMixin(EntityType<? extends AbstractArrow> type, Level level) {
+                  super(type, level);
+              }
+
+              // Remember the slot at the moment of the throw (the item is still in the inventory here).
+              @Inject(
+                  method = "<init>(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V",
+                  at = @At("TAIL"))
+              private void loyaltyslot$remember(Level level, LivingEntity owner, ItemStack stack, CallbackInfo ci) {
+                  if (owner instanceof Player player) {
+                      ItemStack used = player.getUseItem();
+                      Inventory inv = player.getInventory();
+                      for (int i = 0; i < inv.getContainerSize(); i++) {
+                          if (inv.getItem(i) == used) {
+                              this.loyaltyslot$slot = i;
+                              break;
+                          }
+                      }
+                  }
+              }
+
+              // When a returning (Loyalty) trident reaches its owner, try the original slot first.
+              @Inject(
+                  method = "tryPickup(Lnet/minecraft/world/entity/player/Player;)Z",
+                  at = @At("HEAD"),
+                  cancellable = true)
+              private void loyaltyslot$returnToSlot(Player player, CallbackInfoReturnable<Boolean> cir) {
+                  if (this.loyaltyslot$slot < 0 || !this.isNoPhysics() || this.getOwner() != player) return;
+                  if (player.getAbilities().instabuild) return; // creative: the item was never removed
+                  Inventory inv = player.getInventory();
+                  if (this.loyaltyslot$slot >= inv.getContainerSize()) return;
+                  if (inv.getItem(this.loyaltyslot$slot).isEmpty()) {
+                      inv.setItem(this.loyaltyslot$slot, this.getPickupItem());
+                      cir.setReturnValue(true);
+                  }
+                  // slot is taken -> vanilla behaviour (first free slot)
+              }
+          }
+          EOF_LOYALTY
+      - name: Build
+        run: gradle build --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loyalty-slot-jar
+          path: build/libs/loyalty-slot-1.0.0.jar
