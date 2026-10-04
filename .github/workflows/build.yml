@@ -93,6 +93,7 @@ jobs:
           cat > src/main/java/com/loyaltyslot/mixin/ThrownTridentMixin.java <<'EOF_LOYALTY'
           package com.loyaltyslot.mixin;
 
+          import net.minecraft.world.InteractionHand;
           import net.minecraft.world.entity.EntityType;
           import net.minecraft.world.entity.LivingEntity;
           import net.minecraft.world.entity.player.Inventory;
@@ -101,6 +102,8 @@ jobs:
           import net.minecraft.world.entity.projectile.arrow.ThrownTrident;
           import net.minecraft.world.item.ItemStack;
           import net.minecraft.world.level.Level;
+          import org.slf4j.Logger;
+          import org.slf4j.LoggerFactory;
           import org.spongepowered.asm.mixin.Mixin;
           import org.spongepowered.asm.mixin.Unique;
           import org.spongepowered.asm.mixin.injection.At;
@@ -111,7 +114,10 @@ jobs:
           @Mixin(ThrownTrident.class)
           public abstract class ThrownTridentMixin extends AbstractArrow {
 
-              /** Inventory slot the trident was thrown from (0-8 hotbar, 9-35 main, 40 offhand). -1 = unknown. */
+              @Unique
+              private static final Logger LOYALTYSLOT_LOG = LoggerFactory.getLogger("LoyaltySlot");
+
+              /** Slot the trident was thrown from (0-8 hotbar, 9-35 main, 40 offhand). -1 = unknown. */
               @Unique
               private int loyaltyslot$slot = -1;
 
@@ -119,20 +125,16 @@ jobs:
                   super(type, level);
               }
 
-              // Remember the slot at the moment of the throw (the item is still in the inventory here).
+              // Remember the slot at the moment of the throw.
               @Inject(
                   method = "<init>(Lnet/minecraft/world/level/Level;Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;)V",
                   at = @At("TAIL"))
               private void loyaltyslot$remember(Level level, LivingEntity owner, ItemStack stack, CallbackInfo ci) {
                   if (owner instanceof Player player) {
-                      ItemStack used = player.getUseItem();
-                      Inventory inv = player.getInventory();
-                      for (int i = 0; i < inv.getContainerSize(); i++) {
-                          if (inv.getItem(i) == used) {
-                              this.loyaltyslot$slot = i;
-                              break;
-                          }
-                      }
+                      this.loyaltyslot$slot = (player.getUsedItemHand() == InteractionHand.OFF_HAND)
+                          ? 40
+                          : player.getInventory().getSelectedSlot();
+                      LOYALTYSLOT_LOG.info("[LoyaltySlot] trident thrown from slot {}", this.loyaltyslot$slot);
                   }
               }
 
@@ -142,12 +144,17 @@ jobs:
                   at = @At("HEAD"),
                   cancellable = true)
               private void loyaltyslot$returnToSlot(Player player, CallbackInfoReturnable<Boolean> cir) {
-                  if (this.loyaltyslot$slot < 0 || !this.isNoPhysics() || this.getOwner() != player) return;
-                  if (player.getAbilities().instabuild) return; // creative: the item was never removed
                   Inventory inv = player.getInventory();
-                  if (this.loyaltyslot$slot >= inv.getContainerSize()) return;
-                  if (inv.getItem(this.loyaltyslot$slot).isEmpty()) {
-                      inv.setItem(this.loyaltyslot$slot, this.getPickupItem());
+                  int slot = this.loyaltyslot$slot;
+                  boolean inRange = slot >= 0 && slot < inv.getContainerSize();
+                  boolean slotEmpty = inRange && inv.getItem(slot).isEmpty();
+                  LOYALTYSLOT_LOG.info("[LoyaltySlot] pickup: slot={} noPhysics={} ownerOk={} slotEmpty={} creative={}",
+                      slot, this.isNoPhysics(), this.getOwner() == player, slotEmpty, player.getAbilities().instabuild);
+
+                  if (!inRange || !this.isNoPhysics() || this.getOwner() != player) return;
+                  if (player.getAbilities().instabuild) return; // creative: the item was never removed
+                  if (slotEmpty) {
+                      inv.setItem(slot, this.getPickupItem());
                       cir.setReturnValue(true);
                   }
                   // slot is taken -> vanilla behaviour (first free slot)
@@ -160,3 +167,4 @@ jobs:
         with:
           name: loyalty-slot-jar
           path: build/libs/loyalty-slot-1.0.0.jar
+          
